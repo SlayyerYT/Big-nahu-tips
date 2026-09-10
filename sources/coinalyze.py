@@ -7,14 +7,19 @@ share. That is the closest approximation available: per-venue account counts,
 which a weighted mean would need, are not exposed by any public API.
 
 Quota: 40 API calls/minute/key, and *each symbol* in a request counts as one
-call. 20 coins x 3 venues = 60 symbols per cycle = 6 calls/min at a 10-minute
-cadence. Comfortably inside the limit.
+call. Twenty coins across two venues is 40 symbols - the entire minute's budget
+in a single burst, before the two metadata calls. Averaging over the posting
+interval is meaningless here: a per-minute limiter sees the burst, not the
+average. Hence the rolling-window limiter below, plus a 429 retry that honours
+Retry-After.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from collections import deque
 from pathlib import Path
 
 import aiohttp
@@ -31,7 +36,37 @@ LOOKBACK_S = 25 * 3600
 
 # Venue preference. Deep, liquid books first - a thin venue's account ratio is noise.
 PREFERRED_EXCHANGES = ["binance", "bybit", "okx"]
-MAX_VENUES_PER_COIN = 3
+# Two venues x 20 coins = 40 symbols = exactly the per-minute quota. Raising this
+# does not buy much accuracy and costs a forced wait every cycle.
+MAX_VENUES_PER_COIN = 2
+
+# Documented limit is 40 calls/minute/key. Requests that exceed it are paced by
+# the limiter rather than being allowed to fail.
+RATE_LIMIT_PER_MIN = 40
+RATE_WINDOW_S = 60.0
+
+
+class _RateLimiter:
+    """Rolling-window limiter. Costs are in API calls, one per requested symbol."""
+
+    def __init__(self, limit: int, window: float):
+        self.limit = limit
+        self.window = window
+        self._calls: deque[tuple[float, int]] = deque()
+
+    async def acquire(self, cost: int) -> None:
+        cost = max(1, min(cost, self.limit))
+        while True:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0][0] >= self.window:
+                self._calls.popleft()
+            used = sum(c for _, c in self._calls)
+            if used + cost <= self.limit:
+                self._calls.append((now, cost))
+                return
+            wait = self.window - (now - self._calls[0][0]) + 0.25
+            log.info("coinalyze quota reached, waiting %.1fs for the window to roll", wait)
+            await asyncio.sleep(wait)
 
 MARKETS_CACHE = Path(__file__).resolve().parent.parent / "cache" / "coinalyze_markets.json"
 MARKETS_TTL_S = 24 * 3600
@@ -47,6 +82,7 @@ class CoinalyzeSource:
         self.api_key = api_key
         self._symbol_map: dict[str, list[str]] | None = None
         self._venue_names: list[str] = []
+        self._limiter = _RateLimiter(RATE_LIMIT_PER_MIN, RATE_WINDOW_S)
 
     @property
     def label(self) -> str:
@@ -56,20 +92,35 @@ class CoinalyzeSource:
     def venues(self) -> list[str]:
         return self._venue_names or [e.capitalize() for e in PREFERRED_EXCHANGES]
 
-    async def _get(self, path: str, params: dict | None = None):
+    async def _get(self, path: str, params: dict | None = None, cost: int = 1):
         params = dict(params or {})
         params["api_key"] = self.api_key
-        async with self.session.get(
-            f"{BASE}{path}", params=params, timeout=aiohttp.ClientTimeout(total=45)
-        ) as resp:
-            if resp.status == 401:
-                raise SourceError("Coinalyze rejected the API key (401)")
-            if resp.status == 429:
-                retry = resp.headers.get("Retry-After", "?")
-                raise SourceError(f"Coinalyze rate limited (429), retry after {retry}s")
-            if resp.status != 200:
-                raise SourceError(f"Coinalyze {path} -> HTTP {resp.status}")
-            return await resp.json()
+
+        for attempt in (1, 2):
+            await self._limiter.acquire(cost)
+            async with self.session.get(
+                f"{BASE}{path}", params=params, timeout=aiohttp.ClientTimeout(total=45)
+            ) as resp:
+                if resp.status == 401:
+                    raise SourceError("Coinalyze rejected the API key (401)")
+                if resp.status == 429:
+                    # The limiter and the server can disagree about where the
+                    # window starts; obey the server and try once more.
+                    retry_after = _retry_after_seconds(resp.headers.get("Retry-After"))
+                    if attempt == 1:
+                        log.warning(
+                            "coinalyze returned 429, sleeping %.0fs before one retry",
+                            retry_after,
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                    raise SourceError(
+                        f"Coinalyze rate limited (429) twice, retry after {retry_after:.0f}s"
+                    )
+                if resp.status != 200:
+                    raise SourceError(f"Coinalyze {path} -> HTTP {resp.status}")
+                return await resp.json()
+        raise SourceError("Coinalyze request failed")  # unreachable
 
     async def _exchange_codes(self) -> dict[str, str]:
         """Map exchange code -> lowercase exchange name."""
@@ -152,6 +203,7 @@ class CoinalyzeSource:
                     "from": str(now_ts - LOOKBACK_S),
                     "to": str(now_ts),
                 },
+                cost=len(batch),  # each symbol is billed as one API call
             )
             for entry in rows:
                 hist = entry.get("history") or []
@@ -210,6 +262,13 @@ class CoinalyzeSource:
             h1=at(3600, tol),
             h24=at(86400, max(tol, 900)),
         )
+
+
+def _retry_after_seconds(header: str | None, default: float = 61.0) -> float:
+    try:
+        return max(1.0, float(header))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _chunks(items: list[str], size: int):
