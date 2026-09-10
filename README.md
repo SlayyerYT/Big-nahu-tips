@@ -198,8 +198,37 @@ produces exactly the table a long-running process would.
    - Name: `DISCORD_WEBHOOK_URL`, value: the webhook URL
    - Optionally `COINALYZE_API_KEY`
 
-4. **Run it.** Repo → *Actions* → *Post altcoin long/short table* → *Run
-   workflow*. That posts immediately; after that the schedule takes over.
+4. **Run it once by hand** to check the setup: repo → *Actions* → *Post altcoin
+   long/short table* → *Run workflow*.
+
+5. **Set up the external trigger** (see below). GitHub's own scheduler is not
+   reliable enough for a 10-minute cadence.
+
+### Why an external trigger
+
+GitHub puts `schedule:` runs on a low-priority queue and states they may be
+delayed during high load; on a brand-new repository this meant **zero** runs in
+half an hour, while every manual run started within seconds. Their docs also
+recommend no more frequent than 15 minutes on free public repos.
+
+`workflow_dispatch` runs are not throttled, so a free external cron service
+calls the dispatch API instead:
+
+- **URL** `https://api.github.com/repos/<owner>/<repo>/actions/workflows/post.yml/dispatches`
+- **Method** POST
+- **Headers**
+  - `Authorization: Bearer <token>`
+  - `Accept: application/vnd.github+json`
+  - `X-GitHub-Api-Version: 2022-11-28`
+- **Body** `{"ref": "main"}`
+- **Schedule** every 10 minutes
+
+The token is a fine-grained personal access token scoped to this repository
+alone, with *Actions: Read and write*. A successful call returns HTTP 204 with
+an empty body.
+
+`schedule:` is intentionally absent from the workflow: if a throttled run fired
+later it would post a duplicate table.
 
 ### Binance is geo-blocked on GitHub runners
 
