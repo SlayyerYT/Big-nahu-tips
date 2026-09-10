@@ -46,6 +46,15 @@ class BinanceSource:
         if self._perps is not None:
             return self._perps
         async with self.session.get(EXCHANGE_INFO_URL, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 451:
+                # Binance refuses its futures API from restricted regions, and
+                # GitHub Actions runners are US-based. Say so plainly: the raw
+                # 451 traceback gives no hint that geography is the problem.
+                raise SourceError(
+                    "Binance returned 451 (geo-blocked). Its futures API refuses "
+                    "requests from this region - GitHub Actions runners are US-based. "
+                    "Set COINALYZE_API_KEY to use Coinalyze instead."
+                )
             resp.raise_for_status()
             info = await resp.json()
         self._perps = {
@@ -60,6 +69,8 @@ class BinanceSource:
     async def _fetch_series(self, market: str) -> list[Point]:
         params = {"symbol": market, "period": PERIOD, "limit": str(LIMIT)}
         async with self.session.get(RATIO_URL, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 451:
+                raise SourceError("Binance geo-blocked this request (451)")
             if resp.status != 200:
                 raise SourceError(f"{market}: HTTP {resp.status}")
             rows = await resp.json()

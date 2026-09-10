@@ -201,6 +201,21 @@ produces exactly the table a long-running process would.
 4. **Run it.** Repo → *Actions* → *Post altcoin long/short table* → *Run
    workflow*. That posts immediately; after that the schedule takes over.
 
+### Binance is geo-blocked on GitHub runners
+
+**A Coinalyze API key is required for the Actions path.** GitHub's runners are
+US-based and Binance answers its futures API with HTTP 451 ("Unavailable For
+Legal Reasons") from there. Bybit and OKX restrict US traffic too, so no
+exchange-direct fallback fixes this.
+
+Coinalyze is a data aggregator rather than an exchange and is not subject to
+those restrictions, so it works from the runner. Add the key as a second
+repository secret named `COINALYZE_API_KEY` - the workflow already passes it
+through.
+
+Running locally from an unrestricted region, Binance works fine and no key is
+needed.
+
 ### Notes
 
 - **Scheduled runs can be delayed** by a few minutes when GitHub's queue is busy.
