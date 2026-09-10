@@ -1,0 +1,48 @@
+name: Post altcoin long/short table
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub's minimum is 5, and scheduled runs can be delayed
+    # by a few minutes when their queue is busy - the table is timestamped from
+    # the market data, not the trigger, so a late run is still correct.
+    - cron: "*/10 * * * *"
+  # Lets you trigger a post by hand from the Actions tab, which is also the
+  # quickest way to verify the setup works.
+  workflow_dispatch:
+
+# If a run is somehow still going when the next fires, skip rather than stack up.
+concurrency:
+  group: post-table
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Keeps the coin list between runs so CoinGecko is hit once a day rather
+      # than 144 times - their free tier rate-limits cloud IPs aggressively.
+      - uses: actions/cache@v4
+        with:
+          path: cache
+          key: universe-${{ github.run_id }}
+          restore-keys: universe-
+
+      - name: Install dependencies
+        run: pip install --quiet -r requirements-webhook.txt
+
+      - name: Post the table
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          COINALYZE_API_KEY: ${{ secrets.COINALYZE_API_KEY }}
+          LAYOUT: mobile
+          TOP_N: "20"
+          POST_INTERVAL_MINUTES: "10"
+        run: python post_once.py

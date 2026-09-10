@@ -1,0 +1,8 @@
+# Secrets - never commit
+.env
+
+# Build artefacts / local state
+altcoin-ls-bot-upload.zip
+cache/
+__pycache__/
+*.pyc
