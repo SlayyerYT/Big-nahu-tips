@@ -260,8 +260,11 @@ later it would post a duplicate table.
 
 **A Coinalyze API key is required for the Actions path.** GitHub's runners are
 US-based and Binance answers its futures API with HTTP 451 ("Unavailable For
-Legal Reasons") from there. Bybit and OKX restrict US traffic too, so no
-exchange-direct fallback fixes this.
+Legal Reasons") from there. Bybit is unreachable from a runner as well, so no
+exchange-direct fallback fixes the table's own data.
+
+OKX, measured separately, **is** reachable - which is what makes the `SIZE`
+column possible. Do not generalise "exchanges are blocked" to it.
 
 Coinalyze is a data aggregator rather than an exchange and is not subject to
 those restrictions, so it works from the runner. Add the key as a second
