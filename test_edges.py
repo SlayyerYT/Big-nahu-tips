@@ -316,6 +316,21 @@ check("payload carries one embed", len(payload["embeds"]) == 1)
 check("footer names the timezone", "Europe/Vienna" in payload["embeds"][0]["footer"]["text"])
 check("footer names the source", "ForexFactory" in payload["embeds"][0]["footer"]["text"])
 
+# Test mode must be unmistakable: a test post that reads like the real thing is
+# worse than none, since its events are mostly in the past.
+test_payload = post_calendar.build_payload(events, CAL_NOW, VIENNA, 14, True)
+real_payload = post_calendar.build_payload(events, CAL_NOW, VIENNA, 7, False)
+check("test post is marked in the title", "TEST" in test_payload["embeds"][0]["title"])
+check("test post warns in the body", "Delivery test" in test_payload["embeds"][0]["description"])
+check("test post is marked in the footer", "TEST RUN" in test_payload["embeds"][0]["footer"]["text"])
+check("test post uses a different colour", test_payload["embeds"][0]["color"] != real_payload["embeds"][0]["color"])
+check("the real post carries no test marking",
+      "TEST" not in real_payload["embeds"][0]["title"]
+      and "TEST" not in real_payload["embeds"][0]["footer"]["text"]
+      and "Delivery test" not in real_payload["embeds"][0]["description"])
+# The widened window has to show up in the rendered date range, not just the flag.
+check("test window spans two weeks", "27 Sep" in post_calendar.build_description(events, CAL_NOW, VIENNA, 14))
+
 # A packed week must degrade by dropping whole lines, never mid-event.
 flood = econ_calendar._select([feed_row(1 + i * 0.01, title=f"Event number {i}") for i in range(400)], CAL_NOW, 7)
 flooded = post_calendar.build_description(flood, CAL_NOW, VIENNA)

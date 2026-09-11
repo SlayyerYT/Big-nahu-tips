@@ -10,6 +10,11 @@ name: Post the macro week ahead
 # timezone on the cron-job.org entry keeps 08:00 meaning 08:00 through DST.
 on:
   workflow_dispatch:
+    inputs:
+      test:
+        description: "Delivery test: post regardless of the date, marked as a test"
+        type: boolean
+        default: false
 
 # Its own group. Sharing post.yml's "post-table" group would let a weekly run
 # and a ten-minute run block each other for no reason.
@@ -38,7 +43,15 @@ jobs:
       - name: Install dependencies
         run: pip install --quiet -r requirements-webhook.txt
 
+      # The weekly cron sends no inputs at all, so `test` is unset rather than
+      # false there - hence comparing against the string 'true' instead of
+      # relying on the boolean, which would make every scheduled post a test.
       - name: Post the calendar
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python post_calendar.py
+        run: |
+          if [ "${{ inputs.test }}" = "true" ]; then
+            python post_calendar.py --test
+          else
+            python post_calendar.py
+          fi
