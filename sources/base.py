@@ -30,6 +30,10 @@ class CoinLS:
     prev: Point | None = None  # ~1 posting interval ago
     h1: Point | None = None
     h24: Point | None = None
+    # Size-weighted, and from a different source and a different population than
+    # every other field here - see sources/okx.py. Optional on purpose: it is
+    # attached after the row is built, and stays None whenever OKX cannot answer.
+    size: Point | None = None
 
     @property
     def delta_pp(self) -> float | None:

@@ -4,6 +4,7 @@ import sys
 import formatter as fmt
 from sources.base import CoinLS, Point, average_points, nearest, prev_point
 from sources.binance import build_row
+from sources.okx import _latest_point
 
 FAILS = []
 
@@ -132,6 +133,110 @@ big = [CoinLS(f"CN{i:02d}", ["v"], Point(NOW, 55.5, 44.5), Point(NOW - 600, 55.0
 for name in ("mobile", "wide"):
     desc = fmt.build_description(big, fmt.get_layout(name))
     check(f"[{name}] 20 rows fit an embed ({len(desc)} chars)", len(desc) <= 4096)
+
+# --- OKX size column -------------------------------------------------------
+NOW_MS = NOW * 1000
+
+
+def okx_rows(*pairs):
+    """OKX rubik shape: [timestamp_ms, ratio] strings, newest first."""
+    return [[str(ts), str(r)] for ts, r in pairs]
+
+
+# A ratio is converted to shares so it can live in the same Point as everything
+# else; round-tripping it back must land on the number OKX actually sent.
+p = _latest_point(okx_rows((NOW_MS, "3.0")), NOW)
+check("ratio 3.0 -> 75% long", p is not None and abs(p.long_pct - 75.0) < 1e-9)
+check("ratio survives the round trip", abs(p.ratio - 3.0) < 1e-9)
+balanced = _latest_point(okx_rows((NOW_MS, "1.0")), NOW)
+check("ratio 1.0 -> 50/50", abs(balanced.long_pct - 50.0) < 1e-9)
+netshort = _latest_point(okx_rows((NOW_MS, "0.878")), NOW)
+check("sub-1 ratio reads as net short", netshort.long_pct < 50.0)
+
+# Newest-first is OKX's order, but nothing enforces it, so the newest bar is
+# chosen by timestamp rather than by position.
+scrambled = _latest_point(okx_rows((NOW_MS - 600_000, "1.0"), (NOW_MS, "3.0")), NOW)
+check("picks the newest bar, not the first", abs(scrambled.long_pct - 75.0) < 1e-9)
+
+check("stale OKX data is refused", _latest_point(okx_rows((NOW_MS - 99_000_000, "3.0")), NOW) is None)
+check("empty OKX response -> None", _latest_point([], NOW) is None)
+check("zero ratio is not a reading", _latest_point(okx_rows((NOW_MS, "0")), NOW) is None)
+check("negative ratio is not a reading", _latest_point(okx_rows((NOW_MS, "-2")), NOW) is None)
+check("malformed OKX row is skipped", _latest_point([["nope", "x"], [str(NOW_MS), "2.0"]], NOW) is not None)
+
+# --- size column rendering -------------------------------------------------
+def sized_row(coin, long_pct, size_long=None):
+    return CoinLS(
+        coin, ["v"],
+        Point(NOW, long_pct, 100 - long_pct),
+        Point(NOW - 600, long_pct, 100 - long_pct),
+        Point(NOW - 3600, long_pct, 100 - long_pct),
+        Point(NOW - 86400, long_pct, 100 - long_pct),
+        None if size_long is None else Point(NOW, size_long, 100 - size_long),
+    )
+
+
+mobile = fmt.get_layout("mobile")
+
+
+def size_cell(row, layout):
+    """The SIZE cell alone. Searching the whole line matches the chg column's +0.00."""
+    grid = fmt.row_line(row, layout)[: fmt.table_width(layout)]
+    return grid[-layout["widths"]["size"]:].strip()
+
+
+check("missing size prints a blank", size_cell(sized_row("AAA", 70.0), mobile) == "-")
+check("present size prints its ratio", size_cell(sized_row("AAA", 70.0, 75.0), mobile) == "3.00")
+
+# Direction, not magnitude: the two columns come from different populations, so
+# only an opposite *sign* counts as a disagreement.
+check("crowd long + size short = disagreement", fmt.size_disagrees(sized_row("A", 70.0, 30.0)))
+check("crowd short + size long = disagreement", fmt.size_disagrees(sized_row("A", 30.0, 70.0)))
+check("same direction is not a disagreement", not fmt.size_disagrees(sized_row("A", 70.0, 60.0)))
+check("no size data is not a disagreement", not fmt.size_disagrees(sized_row("A", 70.0)))
+
+
+def at_ratio(ratio, crowd_long=70.0):
+    """A row whose SIZE column reads exactly this long/short ratio."""
+    return sized_row("A", crowd_long, 100.0 * ratio / (1.0 + ratio))
+
+
+# The normal case for this metric, and the one a bare >50% comparison gets wrong:
+# the top-trader ratio sits near 1.00 nearly all the time, so without a deadband
+# every flat book scores as a disagreement and the count pins at maximum forever.
+check("size 0.99 is flat, not a disagreement", not fmt.size_disagrees(at_ratio(0.99)))
+check("size 0.97 is flat, not a disagreement", not fmt.size_disagrees(at_ratio(0.97)))
+check("size exactly 1.00 is flat", not fmt.size_disagrees(at_ratio(1.0)))
+check("size 1.01 is flat even against a short crowd", not fmt.size_disagrees(at_ratio(1.01, 30.0)))
+# ...but a real lean still has to register, in both directions.
+check("size 0.76 is a real lean", fmt.size_disagrees(at_ratio(0.76)))
+check("size 1.20 against a short crowd is a real lean", fmt.size_disagrees(at_ratio(1.20, 42.0)))
+check("a lean agreeing with the crowd still does not count", not fmt.size_disagrees(at_ratio(1.20)))
+check("inf size ratio is not a disagreement", not fmt.size_disagrees(sized_row("A", 70.0, 100.0)))
+
+split_rows = [sized_row("A", 70.0, 30.0), sized_row("B", 70.0, 60.0), sized_row("C", 70.0)]
+lines = fmt.summary_lines(split_rows, mobile)
+# The denominator counts only the coins OKX answered for - C must not be scored
+# as agreement just because it has no reading.
+check("split count ignores coins without size data", lines[-1].startswith("1/2"))
+check("summary fits the mobile budget", max(len(ln) for ln in lines) <= 32)
+check("no size data at all -> no split line", len(fmt.summary_lines([sized_row("A", 70.0)], mobile)) == 1)
+
+# --- provenance ------------------------------------------------------------
+plain = fmt.footer_text("Coinalyze", ["Binance", "Bybit"], 10, False, None)
+credited = fmt.footer_text("Coinalyze", ["Binance", "Bybit"], 10, False, "OKX top traders")
+check("footer stays silent about an empty size column", "OKX" not in plain)
+check("footer credits the size source separately", "SIZE: OKX top traders" in credited)
+legend_with = fmt.build_description([sized_row("A", 70.0, 75.0)], mobile)
+legend_without = fmt.build_description([sized_row("A", 70.0)], mobile)
+check("SIZE is explained when present", "top traders only" in legend_with)
+check("SIZE is not explained when absent", "top traders only" not in legend_without)
+
+# The mobile budget is the reason 24h was dropped; prove the swap actually held.
+check("mobile still fits after adding SIZE", fmt.table_width(mobile) <= MOBILE_BUDGET)
+check("mobile shows SIZE", "SIZE" in fmt.header_line(mobile))
+check("mobile dropped 24h", "24h" not in fmt.header_line(mobile))
+check("wide keeps both 24h and SIZE", {"24h", "SIZE"} <= set(fmt.header_line(fmt.get_layout("wide")).split()))
 
 print()
 if FAILS:

@@ -3,11 +3,14 @@
 Posts a top-20 altcoin long/short table to a Discord channel every 10 minutes.
 
 ```
-COIN   LONG   L/S    chg   24h
+COIN   LONG   L/S    chg  SIZE
 ------------------------------
-ETH    73.3  2.75  -0.01  2.47 🟢→
-XRP    70.9  2.43  -0.07  2.36 🟢→
-SOL    69.0  2.22  -0.04  2.14 🟢→
+ETH    69.1  2.23  -0.02  0.97 🟢→
+XRP    74.1  2.86  -0.13  0.90 🟢↘
+SOL    70.9  2.43  -0.03  0.88 🟢→
+------------------------------
+18/20 long | avg 65.4%
+17/19 disagree by size
 ```
 
 | Column | Meaning |
@@ -15,7 +18,7 @@ SOL    69.0  2.22  -0.04  2.14 🟢→
 | `LONG` | Share of accounts net long, in percent (short is the remainder) |
 | `L/S` | Long accounts per short account |
 | `chg` | Change in the long share since the previous post, in percentage points |
-| `24h` | The L/S ratio 24 hours ago (the `wide` layout adds `1h`) |
+| `SIZE` | Long/short weighted by **position size**, OKX **top traders only** (the `wide` layout adds `1h` and `24h`) |
 | 🟢 / 🔴 / ⚪ | Crowd is long (≥55%), short (≤45%), or balanced |
 | ↗ / ↘ / → | Longs building, unwinding, or flat since the last post |
 
@@ -91,12 +94,13 @@ Discord code blocks do not wrap - anything wider than the screen scrolls
 sideways, which is unusable on a phone. Two layouts, set with `LAYOUT` in `.env`:
 
 - **`mobile`** (default, 30 chars) - fits a phone screen.
-- **`wide`** (45 chars) - adds an explicit `SHORT` column and a `1h` column.
+- **`wide`** (51 chars) - adds an explicit `SHORT` column plus `1h` and `24h`.
   Fine on desktop, scrolls sideways on a phone.
 
 `mobile` gives up very little: `SHORT` is always `100 - LONG`, and at a
-10-minute cadence `1h` barely differs from the current value, so `24h` is the
-column actually carrying history.
+10-minute cadence `1h` barely differs from the current value. `24h` went when
+`SIZE` arrived - with no room for both, a second opinion on the present beats a
+third reading of the past, and `chg` still carries the short-term move.
 
 Compare them before choosing:
 
@@ -124,6 +128,28 @@ Because the backup is one venue and the primary is a three-venue mean, the
 levels shift by a point or so on failover. The footer says which source produced
 the table and flags when the backup is in use, so the shift isn't misread as a
 market move.
+
+
+**Size column - OKX** (no key). `SIZE` is the only column that does not count
+accounts. It comes from OKX's top-trader **position** ratio: long notional per
+short notional, among OKX's top-trader cohort.
+
+It routinely disagrees with the account columns, and that is the point of having
+it - on 2026-09-11 the table read 18/20 coins crowd-long while 17 of 19 were net
+short by size. Two caveats belong with any reading of it:
+
+- **Different population, not just different weighting.** It covers a cohort of
+  large traders, not everybody, so it is not comparable to `L/S` in level - only
+  in direction. The legend under the table says so on every post.
+- **A whole-market version would be meaningless.** On a perpetual, total long
+  notional always equals total short notional, so the size ratio across all
+  traders is identically 1.00. The signal only exists inside a subset.
+
+OKX is the only venue that can serve this in CI: Coinalyze has no position-ratio
+endpoint, and Binance and Bybit both refuse GitHub's US-based runners (measured,
+not assumed). There is no fallback, so the column is best-effort - if OKX fails
+or is missing a coin, that cell prints `-`, the footer stops crediting OKX, and
+the rest of the table posts unchanged.
 
 **Coin list — CoinGecko**, refreshed daily and cached to `cache/universe.json`.
 BTC, stablecoins and wrapped/staked derivatives are excluded. The list is walked
@@ -176,8 +202,8 @@ The simplest and most reliable way to run this. A scheduled GitHub Action runs
 no server to keep online, no bot token, no gateway connection, and nothing to
 renew.
 
-This works only because the bot stores nothing between runs: `chg`, `1h` and
-`24h` all come from the market history fetched in that run, so a cold start
+This works only because the bot stores nothing between runs: `chg`, `1h`, `24h`
+and `SIZE` all come from the market history fetched in that run, so a cold start
 produces exactly the table a long-running process would.
 
 ### Setup

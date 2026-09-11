@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from typing import NamedTuple
 
 import aiohttp
 from dotenv import load_dotenv
@@ -22,6 +23,7 @@ import universe
 from sources.base import CoinLS, SourceError
 from sources.binance import BinanceSource
 from sources.coinalyze import CoinalyzeSource
+from sources.okx import OKXSizeSource
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,12 +46,25 @@ LAYOUT = os.getenv("LAYOUT", "mobile").strip().lower()
 USER_AGENT = "altcoin-ls-bot/1.0"
 
 
+class CycleResult(NamedTuple):
+    """One cycle's output. Named because the SIZE column made this a 5-tuple."""
+
+    rows: list[CoinLS]
+    source_label: str
+    venues: list[str]
+    degraded: bool
+    # None whenever the SIZE column is empty, so the footer never credits a
+    # source that did not contribute a single number to this table.
+    size_label: str | None
+
+
 class Pipeline:
     """Fetches one cycle's worth of rows, preferring Coinalyze, falling back to Binance."""
 
     def __init__(self, session: aiohttp.ClientSession, force_source: str | None = None):
         self.session = session
         self.force_source = force_source
+        self._okx = OKXSizeSource(session)
         self._coinalyze: CoinalyzeSource | None = None
         if COINALYZE_KEY and force_source != "binance":
             try:
@@ -61,8 +76,23 @@ class Pipeline:
         self._binance = BinanceSource(session)
         self._primary_failures = 0
 
-    async def run(self) -> tuple[list[CoinLS], str, list[str], bool]:
-        """Returns (rows, source_label, venues, degraded)."""
+    async def _attach_sizes(self, rows: list[CoinLS], now_ts: int) -> str | None:
+        """Add the size-weighted column in place. Returns the label to credit, if any.
+
+        Deliberately soft: OKX is the only venue that can supply this column and
+        there is no fallback, so any failure here must cost the SIZE column and
+        nothing else. Letting it raise would trade a complete table for no table.
+        """
+        try:
+            sizes = await self._okx.fetch_sizes([r.coin for r in rows], now_ts)
+        except Exception as exc:
+            log.warning("size column unavailable this cycle (%s); posting without it", exc)
+            return None
+        for row in rows:
+            row.size = sizes.get(row.coin)
+        return self._okx.label if sizes else None
+
+    async def run(self) -> CycleResult:
         candidates = await universe.get_candidates(self.session)
         now_ts = int(time.time())
         prev_offset_s = INTERVAL_MIN * 60
@@ -71,7 +101,10 @@ class Pipeline:
             try:
                 rows = await self._coinalyze.fetch(candidates, TOP_N, now_ts, prev_offset_s)
                 self._primary_failures = 0
-                return rows, self._coinalyze.label, self._coinalyze.venues, False
+                size_label = await self._attach_sizes(rows, now_ts)
+                return CycleResult(
+                    rows, self._coinalyze.label, self._coinalyze.venues, False, size_label
+                )
             except Exception as exc:
                 self._primary_failures += 1
                 if self.force_source == "coinalyze":
@@ -94,21 +127,25 @@ class Pipeline:
         # levels sit slightly differently. Flag it rather than let the shift read
         # as a market move.
         degraded = self._coinalyze is not None
-        return rows, self._binance.label, self._binance.venues, degraded
+        size_label = await self._attach_sizes(rows, now_ts)
+        return CycleResult(rows, self._binance.label, self._binance.venues, degraded, size_label)
 
 
 async def dry_run(force_source: str | None) -> int:
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
         try:
             pipeline = Pipeline(session, force_source)
-            rows, label, venues, degraded = await pipeline.run()
+            cycle = await pipeline.run()
         except SourceError as exc:
             log.error("%s", exc)
             return 1
 
+    rows = cycle.rows
     layout = fmt.get_layout(LAYOUT)
     description = fmt.build_description(rows, layout)
-    footer = fmt.footer_text(label, venues, INTERVAL_MIN, degraded)
+    footer = fmt.footer_text(
+        cycle.source_label, cycle.venues, INTERVAL_MIN, cycle.degraded, cycle.size_label
+    )
 
     print()
     print(f"TOP {len(rows)} ALTCOIN LONG/SHORT")
@@ -125,15 +162,19 @@ async def dry_run(force_source: str | None) -> int:
     return 0
 
 
-def build_embed(rows, label, venues, degraded):
+def build_embed(cycle: CycleResult):
     import discord
 
     embed = discord.Embed(
-        title=f"\N{BAR CHART} TOP {len(rows)} ALTCOIN LONG/SHORT",
-        description=fmt.build_description(rows, fmt.get_layout(LAYOUT)),
-        colour=fmt.embed_colour(rows),
+        title=f"\N{BAR CHART} TOP {len(cycle.rows)} ALTCOIN LONG/SHORT",
+        description=fmt.build_description(cycle.rows, fmt.get_layout(LAYOUT)),
+        colour=fmt.embed_colour(cycle.rows),
     )
-    embed.set_footer(text=fmt.footer_text(label, venues, INTERVAL_MIN, degraded))
+    embed.set_footer(
+        text=fmt.footer_text(
+            cycle.source_label, cycle.venues, INTERVAL_MIN, cycle.degraded, cycle.size_label
+        )
+    )
     return embed
 
 
@@ -158,15 +199,15 @@ def run_bot() -> int:
     async def post_cycle():
         pipeline: Pipeline = state["pipeline"]  # type: ignore[assignment]
         try:
-            rows, label, venues, degraded = await pipeline.run()
+            cycle = await pipeline.run()
         except Exception:
             log.exception("cycle failed; will retry next interval")
             return
 
         channel = client.get_channel(channel_id) or await client.fetch_channel(channel_id)
         try:
-            await channel.send(embed=build_embed(rows, label, venues, degraded))
-            log.info("posted %d rows from %s", len(rows), label)
+            await channel.send(embed=build_embed(cycle))
+            log.info("posted %d rows from %s", len(cycle.rows), cycle.source_label)
         except discord.Forbidden:
             log.error(
                 "missing permissions in channel %s - the bot needs View Channel, "

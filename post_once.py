@@ -23,7 +23,7 @@ import sys
 import aiohttp
 
 import formatter as fmt
-from bot import INTERVAL_MIN, LAYOUT, USER_AGENT, Pipeline
+from bot import INTERVAL_MIN, LAYOUT, USER_AGENT, CycleResult, Pipeline
 from sources.base import SourceError
 
 log = logging.getLogger("altcoin-ls-post")
@@ -31,15 +31,18 @@ log = logging.getLogger("altcoin-ls-post")
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
 
-def build_payload(rows, label: str, venues: list[str], degraded: bool) -> dict:
+def build_payload(cycle: CycleResult) -> dict:
     layout = fmt.get_layout(LAYOUT)
+    footer = fmt.footer_text(
+        cycle.source_label, cycle.venues, INTERVAL_MIN, cycle.degraded, cycle.size_label
+    )
     return {
         "embeds": [
             {
-                "title": f"\N{BAR CHART} TOP {len(rows)} ALTCOIN LONG/SHORT",
-                "description": fmt.build_description(rows, layout),
-                "color": fmt.embed_colour(rows),
-                "footer": {"text": fmt.footer_text(label, venues, INTERVAL_MIN, degraded)},
+                "title": f"\N{BAR CHART} TOP {len(cycle.rows)} ALTCOIN LONG/SHORT",
+                "description": fmt.build_description(cycle.rows, layout),
+                "color": fmt.embed_colour(cycle.rows),
+                "footer": {"text": footer},
             }
         ]
     }
@@ -48,12 +51,13 @@ def build_payload(rows, label: str, venues: list[str], degraded: bool) -> dict:
 async def run(dry_run: bool) -> int:
     async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
         try:
-            rows, label, venues, degraded = await Pipeline(session).run()
+            cycle = await Pipeline(session).run()
         except SourceError as exc:
             log.error("could not build a table: %s", exc)
             return 1
 
-        payload = build_payload(rows, label, venues, degraded)
+        rows = cycle.rows
+        payload = build_payload(cycle)
         description = payload["embeds"][0]["description"]
 
         if dry_run:
@@ -75,7 +79,7 @@ async def run(dry_run: bool) -> int:
                 # Never log the URL itself - it is the credential.
                 log.error("webhook rejected the post: HTTP %s %s", resp.status, body[:400])
                 return 1
-        log.info("posted %d rows from %s", len(rows), label)
+        log.info("posted %d rows from %s", len(rows), cycle.source_label)
         return 0
 
 
