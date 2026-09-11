@@ -286,6 +286,61 @@ needed.
   python post_once.py --dry-run
   ```
 
+## Weekly macro calendar (Sunday 08:00)
+
+A second, separate post: the high-impact US events scheduled for the coming week,
+so a 70%-long book is not held into a CPI print by accident.
+
+```
+Sun 13 Sep - Sun 20 Sep
+
+__Tue 15 Sep__
+`14:30` **CPI m/m**  - F 0.3% . P 0.2%
+`14:30` **Core CPI m/m**  - F 0.3% . P 0.3%
+
+__Wed 16 Sep__
+`20:00` **FOMC Statement**
+```
+
+Run it by hand, or check it without posting:
+
+```bash
+python post_calendar.py --dry-run
+```
+
+**Source.** ForexFactory's free JSON feed (no key). Filtered to `impact: High`
+for `USD`, plus US bank holidays - a closed session changes how the week trades.
+Widening it to EUR or GBP is one line: `WATCHED_COUNTRIES` in
+`sources/econ_calendar.py`.
+
+**Two traps worth knowing**, both handled in code:
+
+- **The feed rate-limits hard, and answers 429 with an HTML page.** A handful of
+  requests in a few minutes is enough. Decoding that body as JSON gives a parse
+  error that looks like a bug in the parser, so the status is checked first and a
+  429 is retried with backoff. Once a week is far inside the limit, but GitHub
+  runners share outbound IPs, so another job can spend the budget first.
+- **There is no "next week" feed** - `ff_calendar_nextweek.json` 404s, only
+  `thisweek` exists, and it is generated per request with no `Last-Modified`, so
+  there is no way to prove from outside exactly when it rolls over. The code
+  therefore never trusts the label: it filters by timestamp against the window it
+  was asked for. If every event in the feed is in the past, the run **fails and
+  posts nothing** rather than posting an empty week that would read as "quiet
+  week ahead" - the one wrong answer that would actually cost money.
+
+### Scheduling it
+
+Same external-cron pattern as the table, with its own workflow and its own
+cron-job.org entry:
+
+- **URL** `https://api.github.com/repos/<owner>/<repo>/actions/workflows/calendar.yml/dispatches`
+- **Method** POST, body `{"ref":"main"}`, same headers as the table's trigger
+- **Schedule** Sunday 08:00, with the job's timezone set to **Europe/Vienna**
+
+Set the timezone on the cron-job.org entry rather than writing a UTC cron
+expression: GitHub's own `schedule:` is UTC-only, so a fixed expression would
+drift an hour twice a year and post at 07:00 or 09:00 local across DST.
+
 ## Running it as an always-on bot process (alternative)
 
 ### Hosting on a panel (Pella and similar)

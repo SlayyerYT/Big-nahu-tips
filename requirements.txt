@@ -1,3 +1,7 @@
 discord.py>=2.3.2
 aiohttp>=3.9.0
 python-dotenv>=1.0.0
+# Windows ships no system timezone database, so zoneinfo cannot resolve
+# Europe/Vienna without this. Linux (and the GitHub runner) has one, which is
+# why requirements-webhook.txt does not need it.
+tzdata>=2024.1; sys_platform == 'win32'

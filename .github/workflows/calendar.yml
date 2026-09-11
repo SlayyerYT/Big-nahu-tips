@@ -1,0 +1,44 @@
+name: Post the macro week ahead
+
+# Fires once a week, Sunday 08:00 Europe/Vienna, from the same external cron
+# service that drives post.yml.
+#
+# Deliberately not `schedule:`. Two reasons, either one sufficient: GitHub puts
+# scheduled runs on a low-priority queue that ran zero times in half an hour on
+# this repository, and `schedule:` cron is UTC-only, so a fixed expression would
+# drift an hour twice a year and post at 07:00 or 09:00 local. Setting the
+# timezone on the cron-job.org entry keeps 08:00 meaning 08:00 through DST.
+on:
+  workflow_dispatch:
+
+# Its own group. Sharing post.yml's "post-table" group would let a weekly run
+# and a ten-minute run block each other for no reason.
+concurrency:
+  group: post-calendar
+  cancel-in-progress: false
+
+jobs:
+  calendar:
+    runs-on: ubuntu-latest
+    # Longer than post.yml's 5: the feed rate-limits, and the retry path waits
+    # out a 429 rather than giving up on the one post of the week.
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # No cache step on purpose. This runs once a week and has nothing worth
+      # keeping between runs; pointing it at post.yml's `cache` path would have
+      # the two workflows overwriting each other's entries.
+
+      - name: Install dependencies
+        run: pip install --quiet -r requirements-webhook.txt
+
+      - name: Post the calendar
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python post_calendar.py

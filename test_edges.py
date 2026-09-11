@@ -1,7 +1,11 @@
 """Edge cases that only appear on a bad day: gaps, empty histories, extremes."""
 import sys
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import formatter as fmt
+import post_calendar
+from sources import econ_calendar
 from sources.base import CoinLS, Point, average_points, nearest, prev_point
 from sources.binance import build_row
 from sources.okx import _latest_point
@@ -237,6 +241,86 @@ check("mobile still fits after adding SIZE", fmt.table_width(mobile) <= MOBILE_B
 check("mobile shows SIZE", "SIZE" in fmt.header_line(mobile))
 check("mobile dropped 24h", "24h" not in fmt.header_line(mobile))
 check("wide keeps both 24h and SIZE", {"24h", "SIZE"} <= set(fmt.header_line(fmt.get_layout("wide")).split()))
+
+# --- economic calendar -----------------------------------------------------
+CAL_NOW = datetime(2026, 9, 13, 6, 0, tzinfo=timezone.utc)  # a Sunday, 08:00 Vienna
+
+
+def feed_row(offset_hours, title="CPI m/m", country="USD", impact="High",
+             forecast="0.3%", previous="0.2%"):
+    when = CAL_NOW + timedelta(hours=offset_hours)
+    return {
+        "title": title, "country": country, "impact": impact,
+        # The real feed serves US Eastern offsets, not UTC.
+        "date": when.astimezone(timezone(timedelta(hours=-4))).isoformat(),
+        "forecast": forecast, "previous": previous,
+    }
+
+
+week = econ_calendar._select([feed_row(30), feed_row(-30, title="Old CPI")], CAL_NOW, 7)
+check("past events are excluded", [e.title for e in week] == ["CPI m/m"])
+check("timestamps normalise to UTC", week[0].when.tzinfo is timezone.utc)
+
+# The window, not the feed's "thisweek" label, decides what is in.
+check("beyond the horizon is excluded", econ_calendar._select([feed_row(24 * 8)], CAL_NOW, 7) == [])
+check("exactly at the horizon is included", len(econ_calendar._select([feed_row(24 * 7)], CAL_NOW, 7)) == 1)
+check("exactly at now is included", len(econ_calendar._select([feed_row(0)], CAL_NOW, 7)) == 1)
+
+check("low impact is dropped", econ_calendar._select([feed_row(10, impact="Low")], CAL_NOW, 7) == [])
+check("other currencies are dropped", econ_calendar._select([feed_row(10, country="GBP")], CAL_NOW, 7) == [])
+holiday = econ_calendar._select([feed_row(10, title="Bank Holiday", impact="Holiday")], CAL_NOW, 7)
+check("holidays are kept", len(holiday) == 1 and holiday[0].is_holiday)
+
+check("malformed rows are skipped", econ_calendar._select(["nope", None, feed_row(5)], CAL_NOW, 7) != [])
+check("unparseable date is skipped", econ_calendar._select([feed_row(5) | {"date": "soon"}], CAL_NOW, 7) == [])
+check("offset-less date is skipped", econ_calendar._select([feed_row(5) | {"date": "2026-09-14T12:00:00"}], CAL_NOW, 7) == [])
+check("events come back soonest first",
+      [e.title for e in econ_calendar._select([feed_row(40, title="B"), feed_row(20, title="A")], CAL_NOW, 7)] == ["A", "B"])
+
+# The distinction the whole design rests on: an empty week because the week is
+# quiet, versus an empty week because the feed still holds the old week's data.
+# Measured by how far the feed reaches, because "has any future row" is too weak
+# - a stale feed always keeps a few late rows and passed that test while holding
+# nothing about the week ahead.
+stale = [feed_row(-30), feed_row(-60), feed_row(14, impact="Low")]  # tail of the old week
+fresh = [feed_row(-30), feed_row(24 * 6, impact="Low")]             # rolled over
+check("stale feed is not trusted for an empty week",
+      not econ_calendar.WeekAhead([], econ_calendar._reach_days(stale, CAL_NOW)).covers_the_week)
+check("rolled-over feed is trusted",
+      econ_calendar.WeekAhead([], econ_calendar._reach_days(fresh, CAL_NOW)).covers_the_week)
+check("a feed with no future rows reaches zero", econ_calendar._reach_days([feed_row(-30)], CAL_NOW) == 0.0)
+check("reach is measured in days", abs(econ_calendar._reach_days([feed_row(48)], CAL_NOW) - 2.0) < 1e-6)
+
+# --- calendar rendering ----------------------------------------------------
+VIENNA = ZoneInfo("Europe/Vienna")
+events = econ_calendar._select(
+    [feed_row(8, title="CPI m/m"), feed_row(9, title="Core CPI m/m"),
+     feed_row(56, title="FOMC Statement", forecast="", previous=""),
+     feed_row(57, title="Bank Holiday", impact="Holiday", forecast="", previous="")],
+    CAL_NOW, 7,
+)
+desc = post_calendar.build_description(events, CAL_NOW, VIENNA)
+check("every event is rendered", all(t in desc for t in ("CPI m/m", "FOMC Statement", "Bank Holiday")))
+check("forecast and previous appear", "F 0.3%" in desc and "P 0.2%" in desc)
+# FOMC statements carry no numbers; an empty "F  / P" would be noise.
+check("no empty forecast block", "F  " not in desc and "— ·" not in desc)
+check("days are grouped", desc.count("__") == 2 * 2)  # two distinct local days
+check("description fits an embed", len(desc) <= 4096)
+
+quiet = post_calendar.build_description([], CAL_NOW, VIENNA)
+check("a genuinely quiet week says so", "No high-impact US events" in quiet)
+check("quiet week never claims events", "F " not in quiet)
+
+payload = post_calendar.build_payload(events, CAL_NOW, VIENNA)
+check("payload carries one embed", len(payload["embeds"]) == 1)
+check("footer names the timezone", "Europe/Vienna" in payload["embeds"][0]["footer"]["text"])
+check("footer names the source", "ForexFactory" in payload["embeds"][0]["footer"]["text"])
+
+# A packed week must degrade by dropping whole lines, never mid-event.
+flood = econ_calendar._select([feed_row(1 + i * 0.01, title=f"Event number {i}") for i in range(400)], CAL_NOW, 7)
+flooded = post_calendar.build_description(flood, CAL_NOW, VIENNA)
+check(f"overlong calendar is truncated ({len(flooded)} chars)", len(flooded) <= 4096)
+check("truncation is announced", "truncated" in flooded)
 
 print()
 if FAILS:
