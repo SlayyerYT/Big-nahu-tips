@@ -48,7 +48,9 @@ jobs:
       # relying on the boolean, which would make every scheduled post a test.
       - name: Post the calendar
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # Its own channel, so its own webhook. No fallback to the table's
+          # secret: a missing value should fail loudly, not post in the wrong place.
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_CALENDAR_WEBHOOK_URL }}
         run: |
           if [ "${{ inputs.test }}" = "true" ]; then
             python post_calendar.py --test
